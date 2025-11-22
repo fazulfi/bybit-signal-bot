@@ -1,1 +1,12 @@
+python-telegram-bot==13.12
+ccxt
+pandas
+python-dotenv
+requests
+SQLAlchemy
+alembic
+python-dateutil
+pytz
+redis
+cachetools
 
