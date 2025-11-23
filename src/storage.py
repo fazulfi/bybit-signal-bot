@@ -33,10 +33,14 @@ class Storage:
         conn = self._connect()
         cur = conn.cursor()
 
+        # gunakan timestamp UTC timezone-aware
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).isoformat()  # ex: 2025-01-03T02:30:00+00:00
+
         cur.execute("""
             INSERT INTO signals (symbol, side, price, timestamp)
             VALUES (?, ?, ?, ?)
-        """, (symbol, side, price, datetime.utcnow().isoformat()))
+        """, (symbol, side, price, ts))
 
         conn.commit()
         conn.close()

@@ -20,3 +20,17 @@ RSI_PERIOD = int(os.getenv("RSI_PERIOD", "14"))
 DEBOUNCE_MINUTES = int(os.getenv("DEBOUNCE_MINUTES", "15"))
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Jakarta")
 LANG = os.getenv("LANG", "id")
+
+# ================================
+# Default Strategy Parameters
+# ================================
+
+# Default Stop-Loss (fractional) -> 0.01 = 1%
+SL = float(os.getenv("SL", "0.01"))
+
+# Default Risk/Reward Ratio (e.g. 2.0 = TP 2× SL)
+RR = float(os.getenv("RR", "2.0"))
+
+# Default Take-Profit (if you prefer explicit TP)
+# If not set, engine will compute TP = SL * RR
+TP = SL * RR

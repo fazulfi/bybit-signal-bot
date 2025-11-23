@@ -1,0 +1,239 @@
+# src/workers/signal_engine.py
+"""
+Signal Engine
+-------------
+Menghasilkan sinyal BUY / SELL / NONE dari dataframe OHLCV
+yang sudah memiliki indikator (EMA fast, EMA slow, RSI).
+
+Logic default:
+ - BUY  = ema_fast cross up ema_slow AND RSI > 50
+ - SELL = ema_fast cross down ema_slow AND RSI < 50
+ - NONE = otherwise
+
+Tersedia:
+ - detect_signal(df, symbol, debounce_minutes)
+ - has_cross_up(series_fast, series_slow)
+ - has_cross_down(series_fast, series_slow)
+"""
+
+from datetime import datetime, timedelta, timezone
+import pandas as pd
+from typing import Any
+
+from src.storage import Storage
+from src.config import (
+    EMA_FAST, EMA_SLOW, RSI_PERIOD,
+    DEBOUNCE_MINUTES,
+)
+
+
+# =============================================
+# HELPER: CROSS DETECTION
+# =============================================
+
+def has_cross_up(fast: pd.Series, slow: pd.Series) -> bool:
+    """
+    Cross up = sebelumnya fast < slow dan sekarang fast > slow
+    """
+    if len(fast) < 2 or len(slow) < 2:
+        return False
+    return fast.iloc[-2] < slow.iloc[-2] and fast.iloc[-1] > slow.iloc[-1]
+
+
+def has_cross_down(fast: pd.Series, slow: pd.Series) -> bool:
+    """
+    Cross down = sebelumnya fast > slow dan sekarang fast < slow
+    """
+    if len(fast) < 2 or len(slow) < 2:
+        return False
+    return fast.iloc[-2] > slow.iloc[-2] and fast.iloc[-1] < slow.iloc[-1]
+
+
+# =============================================
+# CORE LOGIC: DETECT SIGNAL
+# =============================================
+
+def detect_signal(df: pd.DataFrame, symbol: str, debounce_minutes: int = DEBOUNCE_MINUTES):
+    """
+    Return salah satu: "BUY" / "SELL" / "NONE"
+    Dengan debounce berbasis DB storage (jangan spam sinyal).
+    """
+
+    # Pastikan data indikator ada
+    if not all(col in df.columns for col in ["ema_fast", "ema_slow", "rsi"]):
+        raise ValueError("Dataframe belum punya kolom indikator (ema_fast, ema_slow, rsi)")
+
+    fast = df["ema_fast"]
+    slow = df["ema_slow"]
+    rsi = df["rsi"]
+
+    # cross detection
+    is_cross_up = has_cross_up(fast, slow)
+    is_cross_down = has_cross_down(fast, slow)
+
+    # Ambil nilai RSI terbaru
+    last_rsi = rsi.iloc[-1]
+
+    # ----------------------------------------
+    # 1) BUY signal logic
+    # ----------------------------------------
+    if is_cross_up and last_rsi > 50:
+        # detect_signal calls _is_debounced(symbol, "BUY", debounce_minutes)
+        if not _is_debounced(symbol, "BUY", debounce_minutes):
+            return "BUY"
+
+    # ----------------------------------------
+    # 2) SELL signal logic
+    # ----------------------------------------
+    if is_cross_down and last_rsi < 50:
+        if not _is_debounced(symbol, "SELL", debounce_minutes):
+            return "SELL"
+
+    # ----------------------------------------
+    # 3) Otherwise
+    return "NONE"
+
+
+# =============================================
+# DEBOUNCE: Hindari spam sinyal
+# =============================================
+
+def _try_get_last_time_from_storage(storage: Storage, symbol: str, side: str) -> Any:
+    """
+    Try several possible Storage API names to fetch last signal/time.
+    Returns whatever the storage returns (could be datetime, dict, int, str) or None.
+    This is designed to be tolerant to several storage implementations.
+    """
+    candidate_methods = [
+        "get_last_signal_time",
+        "get_last_signal_timestamp",
+        "get_last_signal",
+        "last_signal_time",
+        "last_signal",
+        "get_last",
+    ]
+    for m in candidate_methods:
+        if hasattr(storage, m):
+            try:
+                fn = getattr(storage, m)
+                # try common signatures
+                try:
+                    res = fn(symbol, side)
+                except TypeError:
+                    # maybe storage method takes only symbol
+                    try:
+                        res = fn(symbol)
+                    except TypeError:
+                        # try no-arg
+                        res = fn()
+                return res
+            except Exception:
+                # If underlying storage call raises, ignore and try next
+                continue
+    return None
+
+
+def _to_datetime_utc(v) -> datetime | None:
+    """
+    Normalize various timestamp representations into timezone-aware UTC datetime.
+    Supports:
+      - datetime (naive or aware)
+      - int (epoch seconds OR milliseconds)
+      - str (ISO datetime)
+      - dict with key 'timestamp' or 'time'
+    Returns None if cannot parse.
+    """
+    if v is None:
+        return None
+
+    # dict handling
+    if isinstance(v, dict):
+        # common keys
+        for k in ("timestamp", "time", "ts"):
+            if k in v:
+                return _to_datetime_utc(v[k])
+        # maybe dict has nested datetime
+        return None
+
+    # datetime
+    if isinstance(v, datetime):
+        if v.tzinfo is None:
+            return v.replace(tzinfo=timezone.utc)
+        else:
+            return v.astimezone(timezone.utc)
+
+    # integer -> try ms then s
+    if isinstance(v, (int, float)):
+        # heuristics: if >1e12 assume ms
+        try:
+            if v > 1e12:
+                return datetime.fromtimestamp(v / 1000.0, tz=timezone.utc)
+            else:
+                return datetime.fromtimestamp(v, tz=timezone.utc)
+        except Exception:
+            return None
+
+    # string
+    if isinstance(v, str):
+        try:
+            dt = pd.to_datetime(v, utc=True)
+            if dt.tzinfo is None:
+                # pd returns tz-aware Timestamp with tzinfo attribute
+                try:
+                    return dt.to_pydatetime().replace(tzinfo=timezone.utc)
+                except Exception:
+                    return None
+            else:
+                return dt.to_pydatetime().astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    return None
+
+
+def _is_debounced(arg1, arg2, arg3=None):
+    """
+    Flexible debounce helper.
+
+    Two call styles supported:
+      1) _is_debounced(last_time_datetime, debounce_minutes)
+         - arg1: datetime-like, arg2: debounce_minutes
+      2) _is_debounced(symbol, side, debounce_minutes)
+         - arg1: symbol (str), arg2: side (str), arg3: debounce_minutes
+
+    If symbol+side is passed, this function will try to query Storage for the last
+    signal/time using a set of candidate methods (tolerant).
+    """
+    # Style (1): (last_time, debounce_minutes)
+    if isinstance(arg1, datetime) or (arg1 is not None and hasattr(arg1, "tzinfo")):
+        last_time_raw = arg1
+        debounce_minutes = arg2
+    else:
+        # Style (2): (symbol, side, debounce_minutes)
+        symbol = arg1
+        side = arg2
+        debounce_minutes = arg3
+        # attempt to fetch last_time from storage
+        try:
+            storage = Storage()
+            last_time_raw = _try_get_last_time_from_storage(storage, symbol, side)
+        except Exception:
+            last_time_raw = None
+
+    # If no last_time found -> not debounced
+    if last_time_raw is None:
+        return False
+
+    # Normalize to datetime aware UTC
+    last_time = _to_datetime_utc(last_time_raw)
+    if last_time is None:
+        return False
+
+    # now timezone-aware
+    now = datetime.now(timezone.utc)
+
+    diff_minutes = (now - last_time).total_seconds() / 60.0
+    try:
+        return diff_minutes < float(debounce_minutes)
+    except Exception:
+        return False
