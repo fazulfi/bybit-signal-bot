@@ -14,8 +14,8 @@ EMA_FAST = 3
 EMA_SLOW = 6
 RSI_PER  = 14
 DEBOUNCE = 0        # menit (0 = nonaktif)
-FIXED_RR = 1.0      # jika mau fixed RR
-SL_PCT   = 0.005     # jika pakai percent-based SL
+FIXED_RR = 1        # jika mau fixed RR
+SL_PCT   = 0.004    # jika pakai percent-based SL
 # ---------------------------------------------
 
 # import engine/utils dari project (harus jalan dari repo root)
