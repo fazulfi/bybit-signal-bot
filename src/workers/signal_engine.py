@@ -21,8 +21,8 @@ from src import config
 from src.storage import Storage
 
 # RSI thresholds default
-RSI_LOW = 20.0
-RSI_HIGH = 80.0
+RSI_LOW = 21.0
+RSI_HIGH = 79.0
 
 
 def _safe_last(df: pd.DataFrame, col: str):
